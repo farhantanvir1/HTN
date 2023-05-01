@@ -77,16 +77,39 @@ class HTN(torch.nn.Module):
             x = layer(x, edge_index)
         return x
 
+    """
+
+    FT 042923 In this method, output node features for drugs, targets, and diseases are retrieved, concatenated
+    and then fed to an MLP, which predicts the interaction among the triplets.
+    
+    1. the output node features for drugs, targets, and diseases are first extracted
+    from out_nodes_features using the respective indices (drug_indices_batch, target_indices_batch, and 
+    disease_indices_batch). 
+    
+    2. These features are then concatenated along the last dimension to create 
+    interaction_features. 
+    
+    3. The interaction_features are passed through the self.predictor network, 
+    which computes the interaction values. Finally, the predicted interaction values are returned.
+
+    """
+
     def forward_predictor(self, out_nodes_features, drug_indices_batch, target_indices_batch, disease_indices_batch):
+        # Extract the output features of drug, target, and disease nodes from
+        # out_nodes_features using their respective indices
         z_drug = out_nodes_features[drug_indices_batch]
         z_target = out_nodes_features[target_indices_batch]
         z_disease = out_nodes_features[disease_indices_batch]
 
-        # Combine drug, target, and disease features
+        # Combine drug, target, and disease features by concatenating them
+        # along the last dimension
         interaction_features = torch.cat((z_drug, z_target, z_disease), dim=-1)
 
-        # Apply the predictor network to obtain interaction values
+        # Apply the predictor network to obtain interaction values for the
+        # given drug, target, and disease features
         interaction_values = self.predictor(interaction_features)
+
+        # Return the predicted interaction values
         return interaction_values
 
 
@@ -119,10 +142,27 @@ class HTNLayer(torch.nn.Module):
         self.attention_mlp_hidden = attention_mlp_hidden
 
     
-        # Define the attention MLP
+        """
+
+        FT 042923 attention_mlp is a neural network consisting of two linear layers with a ReLU activation 
+        function in between. It computes attention scores for each node triplet by taking the concatenated 
+        features of the nodes as input and processing them through two linear layers with a ReLU activation 
+        in between. It is used to compute the attention scores for each triplet of nodes in the HTNLayer.
+
+        """
+
+
         self.attention_mlp = nn.Sequential(
+            # The first linear layer takes the concatenated features of three nodes (i, j, and k) as input,
+            # and outputs a tensor with a hidden dimension size defined by attention_mlp_hidden.
             nn.Linear(self.num_out_features * 3, self.attention_mlp_hidden),
+            
+            # ReLU activation function is applied element-wise to the output of the first linear layer,
+            # introducing non-linearity to the model.
             nn.ReLU(),
+
+            # The second linear layer takes the output of the ReLU activation and reduces it to a single
+            # scalar value, which will be the attention score for each triplet of nodes.
             nn.Linear(self.attention_mlp_hidden, 1),
         )
 
