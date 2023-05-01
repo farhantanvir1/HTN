@@ -42,10 +42,32 @@ class HTN(torch.nn.Module):
             )
             self.htn_layers.append(layer)
 
+        """
+
+        FT 042923 self.predictor is a sequential neural network consisting of two linear layers separated by a 
+        ReLU activation function.
+        
+        The first layer takes the concatenated features of the drug, target, and disease nodes and projects them
+        to a lower-dimensional space (predictor_hidden_dim). 
+        
+        The second layer takes the output of the first layer and predicts a single interaction value for the 
+        given input. The ReLU activation function introduces non-linearity into the model, which helps it learn 
+        complex patterns in the data.
+
+
+        """
+
         # Add predictor network
         self.predictor = nn.Sequential(
+            # First linear layer: takes the concatenated features of drug, target, and disease
+            # as input (3 * num_features_per_layer[-1]) and outputs predictor_hidden_dim features
             nn.Linear(3 * num_features_per_layer[-1], predictor_hidden_dim),
+
+            # Apply a ReLU activation function to introduce non-linearity
             nn.ReLU(),
+
+            # Second linear layer: takes the output of the previous layer (predictor_hidden_dim features)
+            # and outputs a single value, which represents the predicted interaction value
             nn.Linear(predictor_hidden_dim, 1)
         )
 
