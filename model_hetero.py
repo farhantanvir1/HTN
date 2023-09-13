@@ -34,7 +34,7 @@ class HTN(torch.nn.Module):
                 num_out_features=num_features_per_layer[i+1],
                 num_of_heads=num_heads_per_layer[i+1],
                 concat=True if i < num_of_layers - 1 else False,  # last GAT layer does mean avg, the others do concat
-                activation=nn.ELU() if i < num_of_layers - 1 else None,  # last layer just outputs raw scores
+                activation=nn.Sigmoid() if i < num_of_layers - 1 else None,  # last layer just outputs raw scores
                 dropout_prob=dropout,
                 add_skip_connection=add_skip_connection,
                 bias=bias,
@@ -42,32 +42,10 @@ class HTN(torch.nn.Module):
             )
             self.htn_layers.append(layer)
 
-        """
-
-        FT 042923 self.predictor is a sequential neural network consisting of two linear layers separated by a 
-        ReLU activation function.
-        
-        The first layer takes the concatenated features of the drug, target, and disease nodes and projects them
-        to a lower-dimensional space (predictor_hidden_dim). 
-        
-        The second layer takes the output of the first layer and predicts a single interaction value for the 
-        given input. The ReLU activation function introduces non-linearity into the model, which helps it learn 
-        complex patterns in the data.
-
-
-        """
-
         # Add predictor network
         self.predictor = nn.Sequential(
-            # First linear layer: takes the concatenated features of drug, target, and disease
-            # as input (3 * num_features_per_layer[-1]) and outputs predictor_hidden_dim features
             nn.Linear(3 * num_features_per_layer[-1], predictor_hidden_dim),
-
-            # Apply a ReLU activation function to introduce non-linearity
-            nn.ReLU(),
-
-            # Second linear layer: takes the output of the previous layer (predictor_hidden_dim features)
-            # and outputs a single value, which represents the predicted interaction value
+            nn.LeakyReLU(0.2),
             nn.Linear(predictor_hidden_dim, 1)
         )
 
@@ -77,39 +55,16 @@ class HTN(torch.nn.Module):
             x = layer(x, edge_index)
         return x
 
-    """
-
-    FT 042923 In this method, output node features for drugs, targets, and diseases are retrieved, concatenated
-    and then fed to an MLP, which predicts the interaction among the triplets.
-    
-    1. the output node features for drugs, targets, and diseases are first extracted
-    from out_nodes_features using the respective indices (drug_indices_batch, target_indices_batch, and 
-    disease_indices_batch). 
-    
-    2. These features are then concatenated along the last dimension to create 
-    interaction_features. 
-    
-    3. The interaction_features are passed through the self.predictor network, 
-    which computes the interaction values. Finally, the predicted interaction values are returned.
-
-    """
-
     def forward_predictor(self, out_nodes_features, drug_indices_batch, target_indices_batch, disease_indices_batch):
-        # Extract the output features of drug, target, and disease nodes from
-        # out_nodes_features using their respective indices
         z_drug = out_nodes_features[drug_indices_batch]
         z_target = out_nodes_features[target_indices_batch]
         z_disease = out_nodes_features[disease_indices_batch]
 
-        # Combine drug, target, and disease features by concatenating them
-        # along the last dimension
+        # Combine drug, target, and disease features
         interaction_features = torch.cat((z_drug, z_target, z_disease), dim=-1)
 
-        # Apply the predictor network to obtain interaction values for the
-        # given drug, target, and disease features
+        # Apply the predictor network to obtain interaction values
         interaction_values = self.predictor(interaction_features)
-
-        # Return the predicted interaction values
         return interaction_values
 
 
@@ -142,32 +97,31 @@ class HTNLayer(torch.nn.Module):
         self.attention_mlp_hidden = attention_mlp_hidden
 
     
-        """
-
-        FT 042923 attention_mlp is a neural network consisting of two linear layers with a ReLU activation 
-        function in between. It computes attention scores for each node triplet by taking the concatenated 
-        features of the nodes as input and processing them through two linear layers with a ReLU activation 
-        in between. It is used to compute the attention scores for each triplet of nodes in the HTNLayer.
-
-        """
-
-
+        # Define the attention MLP
         self.attention_mlp = nn.Sequential(
-            # The first linear layer takes the concatenated features of three nodes (i, j, and k) as input,
-            # and outputs a tensor with a hidden dimension size defined by attention_mlp_hidden.
             nn.Linear(self.num_out_features * 3, self.attention_mlp_hidden),
-            
-            # ReLU activation function is applied element-wise to the output of the first linear layer,
-            # introducing non-linearity to the model.
             nn.ReLU(),
-
-            # The second linear layer takes the output of the ReLU activation and reduces it to a single
-            # scalar value, which will be the attention score for each triplet of nodes.
             nn.Linear(self.attention_mlp_hidden, 1),
+        )
+
+        self.edge_nn = nn.Sequential(
+          # The first linear layer takes the concatenated features of two nodes (j, k) as input,
+          # and outputs a tensor with a hidden dimension size defined by self.num_out_features.
+          nn.Linear(self.num_out_features * 2, self.num_out_features),
+
+          # ReLU activation function is applied element-wise to the output of the first linear layer,
+          # introducing non-linearity to the model.
+          nn.LeakyReLU(negative_slope=0.2),
+
+          # The second linear layer takes the output of the ReLU activation and maps it back to a tensor
+          # with the same dimension as the input node embeddings (self.num_out_features), which will
+          # represent the edge (j, k).
+          nn.Linear(self.num_out_features, self.num_out_features),
         )
 
         # Initialize theta (used for combining input features and weighted sum of neighbor features)
         self.theta = nn.Parameter(torch.Tensor(1, self.num_of_heads, self.num_out_features))
+        
         nn.init.xavier_uniform_(self.theta)
 
         if bias and concat:
@@ -251,20 +205,67 @@ class HTNLayer(torch.nn.Module):
 
     """
 
+    """
 
     def aggregate_neighbors(self, in_nodes_features_proj, edge_index, attention_scores):
       # FT 042923 Normalize the attention scores using Softmax
       attention_scores_softmax = F.softmax(attention_scores, dim=-1).unsqueeze(-1)
-      
-      # FT 042923 Element-wise multiplication of neighbor features (j and k)
-      neighbor_product = in_nodes_features_proj[edge_index[1]] * in_nodes_features_proj[edge_index[2]]
-      
+
+      # FT 091123 generating drug node embedding
+      # FT 042923 Concatenating node embedding and passing them through a linear layer
+      concatenated_embeddings = torch.cat((in_nodes_features_proj[edge_index[1]], in_nodes_features_proj[edge_index[2]]), dim=-1)
+      print("concatenated_embeddings",concatenated_embeddings.shape)
+      # Pass concatenated embeddings through the neural network layers
+      neighbor_product = self.edge_nn(concatenated_embeddings)
+
       # FT 042923 Aggregate neighbors for each node (i) using the attention coefficients
       weighted_sum = scatter_add(attention_scores_softmax * neighbor_product, edge_index[0], dim=0, dim_size=in_nodes_features_proj.size(0))
 
        # FT 042923 Combine the input features and the weighted sum of neighbor features using theta
       out_nodes_features = self.theta * in_nodes_features_proj + weighted_sum
+      
+
       return out_nodes_features
+
+    """
+    
+
+    def aggregate_neighbors(self, in_nodes_features_proj, edge_index, attention_scores):
+
+        # Normalize the attention scores using Softmax
+        attention_scores_softmax = F.softmax(attention_scores, dim=-1).unsqueeze(-1)
+
+        # Initialize a list to store the concatenated embeddings
+        concatenated_embeddings = []
+
+        for i in range(3):
+            if i == 0:
+                # FT 042923 Concatenating node embedding and passing them through a linear layer
+                concatenated_embedding = torch.cat((in_nodes_features_proj[edge_index[1]], in_nodes_features_proj[edge_index[2]]), dim=-1)
+            elif i == 1:
+                concatenated_embedding = torch.cat((in_nodes_features_proj[edge_index[0]], in_nodes_features_proj[edge_index[2]]), dim=-1)
+            else:
+                concatenated_embedding = torch.cat((in_nodes_features_proj[edge_index[0]], in_nodes_features_proj[edge_index[1]]), dim=-1)
+
+            neighbor_product = self.edge_nn(concatenated_embedding)
+
+            # Aggregate neighbors for each node (i) using the attention coefficients
+            weighted_sum = scatter_add(
+                attention_scores_softmax * neighbor_product, edge_index[i],
+                dim=0, dim_size=in_nodes_features_proj.size(0)
+            )
+            
+            # Combine the input features and the weighted sum of neighbor features using theta
+            # You can use the original theta as you did before
+            node_features = self.theta * in_nodes_features_proj + weighted_sum
+            
+            # Append the tensor to the list
+            concatenated_embeddings.append(node_features)
+
+        # Concatenate node features for different types of nodes
+        out_node_features = torch.cat(concatenated_embeddings, dim=0)
+
+        return out_node_features
 
 
 
@@ -283,10 +284,8 @@ class HTNLayer(torch.nn.Module):
 
         # 1. Linearly transform node features (num_nodes, num_out_features)
         in_nodes_features_proj = self.linear_proj(in_nodes_features).view(-1, self.num_of_heads, self.num_out_features)
-        
          # 2. Compute attention coefficients for each triplet of nodes.
         attention_scores = self.compute_attention_scores(in_nodes_features_proj, edge_index)
-
          # 3. Aggregate neighbors for each node using the attention coefficients.
         out_nodes_features = self.aggregate_neighbors(in_nodes_features_proj, edge_index, attention_scores)
         if self.concat:
